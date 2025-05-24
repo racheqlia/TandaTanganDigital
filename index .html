@@ -1,0 +1,621 @@
+<html lang="id" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aplikasi RSA Tanda Tangan Digital</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #f1f1f1;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #3b82f6;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #2563eb;
+    }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+
+  <nav class="bg-white shadow-md sticky top-0 z-50">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 flex justify-between items-center h-16">
+      <div class="text-xl font-semibold text-blue-600 cursor-pointer select-none" id="nav-logo">RSA Tanda Tangan Digital</div>
+      <div class="space-x-4" id="nav-links">
+        <!-- Links will be injected by JS -->
+      </div>
+    </div>
+  </nav>
+
+  <main id="app" class="flex-grow max-w-5xl mx-auto w-full px-4 py-6 sm:px-6 lg:px-8"></main>
+
+  <footer class="bg-white border-t mt-12 py-4 text-center text-gray-500 text-sm select-none">
+    &copy; 2024 Aplikasi RSA Tanda Tangan Digital. All rights reserved.
+  </footer>
+
+<script>
+(() => {
+  // SPA State
+  let currentUser = null; // {id, username, email}
+  let rsaKeys = null; // {n, e, d} generated once per session
+  let lastEncrypted = null; // {original, encrypted}
+
+  // Utility: Show toast notification
+  function toast(message, type = 'info') {
+    const colors = {
+      info: 'bg-blue-500',
+      success: 'bg-green-500',
+      error: 'bg-red-500',
+      warning: 'bg-yellow-400 text-black',
+    };
+    const toastEl = document.createElement('div');
+    toastEl.className = `fixed top-5 right-5 px-4 py-2 rounded shadow text-white ${colors[type]} animate-fadeinout z-50`;
+    toastEl.textContent = message;
+    document.body.appendChild(toastEl);
+    setTimeout(() => {
+      toastEl.classList.add('opacity-0');
+      setTimeout(() => toastEl.remove(), 500);
+    }, 3000);
+  }
+
+  // Animate fadeinout keyframes
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes fadeinout {
+      0% {opacity: 0; transform: translateY(-10px);}
+      10%, 90% {opacity: 1; transform: translateY(0);}
+      100% {opacity: 0; transform: translateY(-10px);}
+    }
+    .animate-fadeinout {
+      animation: fadeinout 3.5s ease forwards;
+    }
+  `;
+  document.head.appendChild(style);
+
+  // Navigation rendering
+  function renderNav() {
+    const navLinks = document.getElementById('nav-links');
+    navLinks.innerHTML = '';
+    if (currentUser) {
+      // Logged in nav
+      const welcome = document.createElement('span');
+      welcome.className = 'text-gray-700 font-medium mr-4 hidden sm:inline';
+      welcome.textContent = `Halo, ${currentUser.username}`;
+      navLinks.appendChild(welcome);
+
+      const btnLogout = document.createElement('button');
+      btnLogout.className = 'text-red-600 hover:text-red-800 font-semibold transition';
+      btnLogout.textContent = 'Logout';
+      btnLogout.onclick = () => {
+        fetch('logout.php', {method: 'POST'})
+          .then(r => r.json())
+          .then(res => {
+            if(res.success){
+              currentUser = null;
+              rsaKeys = null;
+              lastEncrypted = null;
+              renderNav();
+              renderLogin();
+              toast('Berhasil logout', 'success');
+            } else {
+              toast('Gagal logout', 'error');
+            }
+          }).catch(() => toast('Gagal logout', 'error'));
+      };
+      navLinks.appendChild(btnLogout);
+    } else {
+      // Not logged in nav
+      const btnLogin = document.createElement('button');
+      btnLogin.className = 'text-blue-600 hover:text-blue-800 font-semibold transition';
+      btnLogin.textContent = 'Login';
+      btnLogin.onclick = () => renderLogin();
+      navLinks.appendChild(btnLogin);
+
+      const btnRegister = document.createElement('button');
+      btnRegister.className = 'text-green-600 hover:text-green-800 font-semibold transition';
+      btnRegister.textContent = 'Register';
+      btnRegister.onclick = () => renderRegister();
+      navLinks.appendChild(btnRegister);
+    }
+  }
+
+  // Validate email format
+  function validateEmail(email) {
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(email.toLowerCase());
+  }
+
+  // RSA Helper Functions (JS Implementation)
+
+  // Check if number is prime (simple, for small primes)
+  function isPrime(num) {
+    if (num <= 1) return false;
+    if (num <= 3) return true;
+    if (num % 2 === 0 || num % 3 === 0) return false;
+    for (let i = 5; i * i <= num; i += 6) {
+      if (num % i === 0 || num % (i + 2) === 0) return false;
+    }
+    return true;
+  }
+
+  // Extended Euclidean Algorithm
+  function egcd(a, b) {
+    if (b === 0) return {g: a, x: 1, y: 0};
+    const {g, x: x1, y: y1} = egcd(b, a % b);
+    return {g, x: y1, y: x1 - Math.floor(a / b) * y1};
+  }
+
+  // Modular inverse
+  function modInverse(e, phi) {
+    const {g, x} = egcd(e, phi);
+    if (g !== 1) return null;
+    return (x % phi + phi) % phi;
+  }
+
+  // Modular exponentiation
+  function modPow(base, exponent, modulus) {
+    if (modulus === 1) return 0;
+    let result = 1n;
+    let b = BigInt(base);
+    let e = BigInt(exponent);
+    let m = BigInt(modulus);
+    b = b % m;
+    while (e > 0) {
+      if (e % 2n === 1n) result = (result * b) % m;
+      e = e >> 1n;
+      b = (b * b) % m;
+    }
+    return result;
+  }
+
+  // Convert string block to number (bigint)
+  function blockToNumber(block) {
+    let num = 0n;
+    for (let i = 0; i < block.length; i++) {
+      num = (num << 8n) + BigInt(block.charCodeAt(i));
+    }
+    return num;
+  }
+
+  // Convert number (bigint) to string block
+  function numberToBlock(num) {
+    let chars = [];
+    while (num > 0) {
+      chars.unshift(String.fromCharCode(Number(num & 255n)));
+      num = num >> 8n;
+    }
+    return chars.join('');
+  }
+
+  // Generate RSA keys (small primes for demo, real apps use big primes)
+  function generateRSAKeys() {
+    // For demo, use fixed small primes p=61, q=53 (safe for demo only)
+    const p = 61n;
+    const q = 53n;
+    const n = p * q; // modulus
+    const phi = (p - 1n) * (q - 1n);
+    const e = 17n; // common choice
+    const d = BigInt(modInverse(Number(e), Number(phi)));
+    return {n, e, d};
+  }
+
+  // Encrypt string with RSA
+  function rsaEncrypt(text, key) {
+    // Encrypt each character as a block of 1 char (for simplicity)
+    // Convert each char to number, encrypt, then join with space
+    const encryptedBlocks = [];
+    for (let i = 0; i < text.length; i++) {
+      const m = BigInt(text.charCodeAt(i));
+      const c = modPow(m, key.e, key.n);
+      encryptedBlocks.push(c.toString());
+    }
+    return encryptedBlocks.join(' ');
+  }
+
+  // Decrypt string with RSA
+  function rsaDecrypt(ciphertext, key) {
+    const blocks = ciphertext.split(' ');
+    let decrypted = '';
+    for (const block of blocks) {
+      const c = BigInt(block);
+      const m = modPow(c, key.d, key.n);
+      decrypted += String.fromCharCode(Number(m));
+    }
+    return decrypted;
+  }
+
+  // Render Login Page
+  function renderLogin() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+      <section class="max-w-md mx-auto bg-white p-8 rounded shadow-md animate-fadein">
+        <h2 class="text-2xl font-semibold mb-6 text-center text-blue-600">Login</h2>
+        <form id="login-form" class="space-y-5">
+          <div>
+            <label for="login-username" class="block mb-1 font-medium text-gray-700">Username atau Email</label>
+            <input type="text" id="login-username" name="username" required class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Masukkan username atau email" />
+          </div>
+          <div>
+            <label for="login-password" class="block mb-1 font-medium text-gray-700">Password</label>
+            <input type="password" id="login-password" name="password" required class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Masukkan password" />
+          </div>
+          <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded transition">Login</button>
+        </form>
+        <p class="mt-4 text-center text-gray-600">Belum punya akun? <button id="to-register" class="text-green-600 hover:underline font-semibold">Register di sini</button></p>
+      </section>
+    `;
+
+    document.getElementById('to-register').onclick = () => renderRegister();
+
+    document.getElementById('login-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const username = e.target.username.value.trim();
+      const password = e.target.password.value.trim();
+      if (!username || !password) {
+        toast('Username/email dan password wajib diisi', 'warning');
+        return;
+      }
+      try {
+        const res = await fetch('login.php', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password})
+        });
+        const data = await res.json();
+        if (data.success) {
+          currentUser = data.user;
+          rsaKeys = generateRSAKeys();
+          lastEncrypted = null;
+          renderNav();
+          renderMain();
+          toast('Login berhasil', 'success');
+        } else {
+          toast(data.message || 'Login gagal', 'error');
+        }
+      } catch {
+        toast('Gagal menghubungi server', 'error');
+      }
+    };
+  }
+
+  // Render Register Page
+  function renderRegister() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+      <section class="max-w-md mx-auto bg-white p-8 rounded shadow-md animate-fadein">
+        <h2 class="text-2xl font-semibold mb-6 text-center text-green-600">Register</h2>
+        <form id="register-form" class="space-y-5">
+          <div>
+            <label for="register-username" class="block mb-1 font-medium text-gray-700">Username</label>
+            <input type="text" id="register-username" name="username" required minlength="3" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Minimal 3 karakter" />
+          </div>
+          <div>
+            <label for="register-email" class="block mb-1 font-medium text-gray-700">Email</label>
+            <input type="email" id="register-email" name="email" required class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Masukkan email valid" />
+          </div>
+          <div>
+            <label for="register-password" class="block mb-1 font-medium text-gray-700">Password</label>
+            <input type="password" id="register-password" name="password" required minlength="6" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Minimal 6 karakter" />
+          </div>
+          <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded transition">Register</button>
+        </form>
+        <p class="mt-4 text-center text-gray-600">Sudah punya akun? <button id="to-login" class="text-blue-600 hover:underline font-semibold">Login di sini</button></p>
+      </section>
+    `;
+
+    document.getElementById('to-login').onclick = () => renderLogin();
+
+    document.getElementById('register-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const username = e.target.username.value.trim();
+      const email = e.target.email.value.trim();
+      const password = e.target.password.value.trim();
+
+      if (username.length < 3) {
+        toast('Username minimal 3 karakter', 'warning');
+        return;
+      }
+      if (!validateEmail(email)) {
+        toast('Email tidak valid', 'warning');
+        return;
+      }
+      if (password.length < 6) {
+        toast('Password minimal 6 karakter', 'warning');
+        return;
+      }
+
+      try {
+        const res = await fetch('register.php', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, email, password})
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast('Registrasi berhasil, silakan login', 'success');
+          renderLogin();
+        } else {
+          toast(data.message || 'Registrasi gagal', 'error');
+        }
+      } catch {
+        toast('Gagal menghubungi server', 'error');
+      }
+    };
+  }
+
+  // Render Main Page (after login)
+  function renderMain() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+      <section class="max-w-3xl mx-auto bg-white p-8 rounded shadow-md animate-fadein">
+        <h2 class="text-2xl font-semibold mb-4 text-center text-blue-700">Selamat datang, ${currentUser.username}!</h2>
+        <form id="encrypt-form" class="space-y-5">
+          <div>
+            <label for="filename" class="block mb-1 font-medium text-gray-700">Nama File (tanpa ekstensi)</label>
+            <input type="text" id="filename" name="filename" required minlength="1" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-600" placeholder="Masukkan nama file" />
+          </div>
+          <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded transition">Enkripsi Nama File</button>
+        </form>
+
+        <div id="result-section" class="mt-8 hidden">
+          <h3 class="text-xl font-semibold mb-2 text-center text-gray-800">Hasil Enkripsi RSA</h3>
+          <textarea id="encrypted-text" readonly class="w-full h-24 p-3 border border-gray-300 rounded resize-none bg-gray-50 text-sm font-mono"></textarea>
+          <div class="mt-4 flex justify-center">
+            <svg id="barcode" class="border border-gray-300 rounded p-2 bg-white"></svg>
+          </div>
+          <div class="mt-6 flex flex-col sm:flex-row sm:justify-center sm:space-x-4 space-y-3 sm:space-y-0">
+            <button id="btn-download-pdf" class="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded transition flex items-center justify-center space-x-2">
+              <i class="fas fa-file-pdf"></i><span>Download PDF</span>
+            </button>
+            <button id="btn-send-email" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded transition flex items-center justify-center space-x-2">
+              <i class="fas fa-envelope"></i><span>Kirim Barcode via Email</span>
+            </button>
+          </div>
+        </div>
+
+        <section id="history-section" class="mt-12">
+          <h3 class="text-xl font-semibold mb-4 text-gray-800">Histori Transaksi RSA</h3>
+          <div id="history-list" class="space-y-4 max-h-96 overflow-y-auto custom-scrollbar pr-2"></div>
+        </section>
+      </section>
+    `;
+
+    document.getElementById('encrypt-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const filename = e.target.filename.value.trim();
+      if (!filename) {
+        toast('Nama file wajib diisi', 'warning');
+        return;
+      }
+      // Encrypt filename using RSA keys
+      try {
+        const encrypted = rsaEncrypt(filename, rsaKeys);
+        lastEncrypted = {original: filename, encrypted};
+        // Show result
+        const resultSection = document.getElementById('result-section');
+        const encryptedText = document.getElementById('encrypted-text');
+        encryptedText.value = encrypted;
+        resultSection.classList.remove('hidden');
+
+        // Generate barcode
+        JsBarcode("#barcode", encrypted, {
+          format: "CODE128",
+          lineColor: "#2563eb",
+          width: 2,
+          height: 80,
+          displayValue: false,
+          margin: 10,
+          background: "#f9fafb"
+        });
+
+        // Save transaction to backend
+        const res = await fetch('save_transaction.php', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            filename_original: filename,
+            filename_encrypted: encrypted
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast('Transaksi berhasil disimpan', 'success');
+          loadHistory();
+        } else {
+          toast('Gagal menyimpan transaksi', 'error');
+        }
+      } catch (err) {
+        toast('Gagal melakukan enkripsi', 'error');
+      }
+    };
+
+    document.getElementById('btn-download-pdf').onclick = () => {
+      if (!lastEncrypted) {
+        toast('Belum ada hasil enkripsi untuk diekspor', 'warning');
+        return;
+      }
+      exportPDF(lastEncrypted.original, lastEncrypted.encrypted);
+    };
+
+    document.getElementById('btn-send-email').onclick = async () => {
+      if (!lastEncrypted) {
+        toast('Belum ada hasil enkripsi untuk dikirim', 'warning');
+        return;
+      }
+      try {
+        // Generate barcode SVG as base64 PNG
+        const svg = document.getElementById('barcode');
+        const svgData = new XMLSerializer().serializeToString(svg);
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const DOMURL = window.URL || window.webkitURL || window;
+        const img = new Image();
+        const svgBlob = new Blob([svgData], {type: 'image/svg+xml;charset=utf-8'});
+        const url = DOMURL.createObjectURL(svgBlob);
+        img.onload = async () => {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          DOMURL.revokeObjectURL(url);
+          const pngBase64 = canvas.toDataURL('image/png');
+
+          // Send email request
+          const res = await fetch('send_email.php', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              filename_original: lastEncrypted.original,
+              filename_encrypted: lastEncrypted.encrypted,
+              barcode_base64: pngBase64
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            toast('Email berhasil dikirim', 'success');
+          } else {
+            toast(data.message || 'Gagal mengirim email', 'error');
+          }
+        };
+        img.onerror = () => {
+          toast('Gagal membuat barcode untuk email', 'error');
+        };
+        img.src = url;
+      } catch {
+        toast('Gagal mengirim email', 'error');
+      }
+    };
+
+    loadHistory();
+  }
+
+  // Load transaction history from backend
+  async function loadHistory() {
+    const historyList = document.getElementById('history-list');
+    historyList.innerHTML = '<p class="text-gray-500 text-center">Memuat histori...</p>';
+    try {
+      const res = await fetch('fetch_history.php');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.transactions)) {
+        if (data.transactions.length === 0) {
+          historyList.innerHTML = '<p class="text-gray-500 text-center">Belum ada histori transaksi.</p>';
+          return;
+        }
+        historyList.innerHTML = '';
+        data.transactions.forEach(tx => {
+          const txDiv = document.createElement('div');
+          txDiv.className = 'bg-gray-50 border border-gray-200 rounded p-4 shadow-sm flex flex-col sm:flex-row sm:justify-between sm:items-center space-y-2 sm:space-y-0';
+          const left = document.createElement('div');
+          left.className = 'text-gray-700 font-medium';
+          left.textContent = tx.filename_original;
+          const center = document.createElement('textarea');
+          center.readOnly = true;
+          center.className = 'w-full sm:w-2/3 h-16 p-2 border border-gray-300 rounded resize-none bg-gray-100 text-xs font-mono';
+          center.textContent = tx.filename_encrypted;
+          const right = document.createElement('div');
+          right.className = 'text-gray-500 text-sm whitespace-nowrap';
+          const date = new Date(tx.waktu);
+          right.textContent = date.toLocaleString('id-ID', {dateStyle: 'short', timeStyle: 'short'});
+          txDiv.appendChild(left);
+          txDiv.appendChild(center);
+          txDiv.appendChild(right);
+          historyList.appendChild(txDiv);
+        });
+      } else {
+        historyList.innerHTML = '<p class="text-red-600 text-center">Gagal memuat histori transaksi.</p>';
+      }
+    } catch {
+      historyList.innerHTML = '<p class="text-red-600 text-center">Gagal memuat histori transaksi.</p>';
+    }
+  }
+
+  // Export PDF using jsPDF
+  async function exportPDF(filename, encrypted) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+
+    doc.setFontSize(18);
+    doc.setTextColor('#2563eb');
+    doc.text('Hasil Enkripsi RSA', 105, 20, null, null, 'center');
+
+    doc.setFontSize(12);
+    doc.setTextColor('#000');
+    doc.text(`Nama File: ${filename}`, 20, 40);
+
+    doc.setFont('courier', 'normal');
+    doc.setFontSize(10);
+    const splitEncrypted = doc.splitTextToSize(encrypted, 170);
+    doc.text('Hasil Enkripsi:', 20, 50);
+    doc.text(splitEncrypted, 20, 56);
+
+    // Generate barcode as PNG base64
+    const svg = document.getElementById('barcode');
+    const svgData = new XMLSerializer().serializeToString(svg);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const DOMURL = window.URL || window.webkitURL || window;
+    const img = new Image();
+    const svgBlob = new Blob([svgData], {type: 'image/svg+xml;charset=utf-8'});
+    const url = DOMURL.createObjectURL(svgBlob);
+
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      DOMURL.revokeObjectURL(url);
+      const pngData = canvas.toDataURL('image/png');
+      doc.addImage(pngData, 'PNG', 60, 80, 90, 40);
+      doc.save(`RSA_Encrypted_${filename}.pdf`);
+    };
+    img.onerror = () => {
+      toast('Gagal membuat barcode untuk PDF', 'error');
+    };
+    img.src = url;
+  }
+
+  // Initial check login status
+  async function checkLogin() {
+    try {
+      const res = await fetch('check_session.php');
+      const data = await res.json();
+      if (data.loggedIn) {
+        currentUser = data.user;
+        rsaKeys = generateRSAKeys();
+        renderNav();
+        renderMain();
+      } else {
+        currentUser = null;
+        rsaKeys = null;
+        renderNav();
+        renderLogin();
+      }
+    } catch {
+      currentUser = null;
+      rsaKeys = null;
+      renderNav();
+      renderLogin();
+    }
+  }
+
+  // Logo click returns to main or login
+  document.getElementById('nav-logo').onclick = () => {
+    if (currentUser) renderMain();
+    else renderLogin();
+  };
+
+  // Start app
+  checkLogin();
+
+})();
+</script>
+
+</body>
+</html>
